@@ -1,0 +1,248 @@
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(purrr)
+  library(tibble)
+  library(limma)
+  library(MKinfer)
+})
+
+# -----------------------------
+# Preprocess (per population)
+# -----------------------------
+preprocess_data <- function(pop_data,
+                            marker_subset = NULL,
+                            age_col = "Age_study_entry",
+                            sex_col = "Sex",
+                            batch_col = "batch",
+                            family_col = "family",
+                            control_label = "Control") {
+
+  # Ensure expected columns exist
+  stopifnot(all(c(age_col, sex_col, batch_col, family_col) %in% colnames(pop_data)))
+
+  # Force Control as reference
+  pop_data[[family_col]] <- relevel(as.factor(pop_data[[family_col]]), ref = control_label)
+
+  # Marker columns: either subset provided, or default 2:30
+  if (is.null(marker_subset)) {
+    expr_cols <- colnames(pop_data)[2:30]
+  } else {
+    marker_subset <- marker_subset[!is.na(marker_subset) & marker_subset != ""]
+    expr_cols <- intersect(marker_subset, colnames(pop_data))
+  }
+  if (length(expr_cols) == 0) return(NULL)
+
+  data_trans <- pop_data %>%
+    mutate(
+      across(all_of(expr_cols), ~ log(. + 1)),
+      batch = as.factor(.data[[batch_col]]),
+      Sex_numeric = as.numeric(as.factor(.data[[sex_col]])),
+      family = .data[[family_col]],
+      Age = as.numeric(.data[[age_col]])
+    ) %>%
+    as.data.frame()
+
+  list(data_trans = data_trans, expr_cols = expr_cols)
+}
+analyze_population_permttest <- function(pop_name,
+                                         marker_subset,
+                                         data,
+                                         pop_col = "pop",
+                                         family_col = "family",
+                                         control_label = "Control",
+                                         min_n_total = 5) {
+
+  pop_data <- data %>% filter(.data[[pop_col]] == pop_name)
+  if (nrow(pop_data) == 0) return(NULL)
+
+  # Force Control reference level early
+  pop_data[[family_col]] <- relevel(as.factor(pop_data[[family_col]]), ref = control_label)
+
+  # Preprocess + choose markers
+  preprocessed <- preprocess_data(pop_data, marker_subset = marker_subset,
+                                  family_col = family_col, control_label = control_label)
+  if (is.null(preprocessed)) return(NULL)
+
+  data_trans <- preprocessed$data_trans
+  expr_cols  <- preprocessed$expr_cols
+
+  # Batch correction
+  data_corrected <- apply_batch_correction(data_trans, expr_cols)
+
+  # Check group sizes
+  fam_counts <- table(data_corrected$family)
+  cat("\nPopulation:", pop_name, "\n")
+  cat("  Control:", ifelse(control_label %in% names(fam_counts), fam_counts[[control_label]], 0), "\n")
+  other_levels <- setdiff(levels(data_corrected$family), control_label)
+  cat("  Other:", ifelse(length(other_levels) > 0, sum(fam_counts[other_levels]), 0), "\n")
+
+  # Permutation t-test per marker
+  perm_results <- map_dfr(expr_cols, function(feature_name) {
+
+    df <- data.frame(
+      value  = data_corrected[[feature_name]],
+      family = data_corrected$family
+    )
+    df <- df[complete.cases(df) & df$family != "", , drop = FALSE]
+
+    # Must have exactly 2 groups: Control and one other group level
+    if (n_distinct(df$family) != 2 || nrow(df) < min_n_total) {
+      return(tibble(
+        feature = feature_name,
+        p_perm  = NA_real_,
+        t_stat  = NA_real_
+      ))
+    }
+
+    # Ensure Control is present and define "Other"
+    lvls <- levels(droplevels(df$family))
+    if (!(control_label %in% lvls)) {
+      return(tibble(feature = feature_name, p_perm = NA_real_, t_stat = NA_real_))
+    }
+    other <- setdiff(lvls, control_label)[1]
+
+    g1 <- df$value[df$family == control_label]  # Control reference
+    g2 <- df$value[df$family == other]          # Other group
+
+    # MKinfer permutation t-test (safe for constant data)
+    perm <- tryCatch(
+      perm.t.test(g1, g2, alternative = "two.sided"),
+      error = function(e) list(p.value = 1, statistic = 0)
+    )
+
+    tibble(
+      feature = feature_name,
+      p_perm  = perm$p.value,
+      t_stat  = unname(perm$statistic)
+    )
+  })
+
+  perm_results %>%
+    mutate(
+      p_perm_adj = p.adjust(p_perm, method = "fdr"),
+      population = pop_name
+    ) %>%
+    arrange(p_perm_adj)
+}
+
+create_beautiful_radarchart <- function(data,
+                                        color = NULL,
+                                        vlabels = colnames(data),
+                                        vlcex = 1.5,
+                                        caxislabels = NULL,
+                                        title = NULL) {
+
+  radarchart(
+    data,
+    axistype = 1,
+    pcol = color,
+    pfcol = scales::alpha(color, 0.20),
+    plwd = 4,
+    plty = 1,
+    cglcol = "grey80",
+    cglty = 1,
+    cglwd = 1,
+    axislabcol = "grey30",
+    vlcex = vlcex,
+    vlabels = vlabels,
+    caxislabels = caxislabels,
+    title = title
+  )
+}
+
+colors <- c("Control" = "#5BBCD6",
+            "PSP-CBD" = "#FF0000")
+
+metacols <- c("ID","pop","batch","Age_study_entry",
+              "Sex","family","Age","Sex_numeric")
+
+for (cell_type in colnames(inclusion)) {
+
+  message("Processing: ", cell_type)
+
+  marker_subset <- inclusion[[cell_type]]
+  marker_subset <- marker_subset[!is.na(marker_subset) & marker_subset != ""]
+  marker_subset <- intersect(marker_subset, colnames(filt_mfi_comb))
+  if (length(marker_subset) == 0) next
+
+  ss_comb <- filt_mfi_comb %>%
+    filter(pop == cell_type,
+           family %in% c("Control","PSP-CBD"))
+
+  if (n_distinct(ss_comb$family) != 2) next
+
+  ss_mat <- ss_comb %>%
+    select(all_of(marker_subset)) %>%
+    mutate(across(everything(), as.numeric)) %>%
+    mutate(across(everything(), ~ log2(.x + 1)))
+
+  rownames(ss_mat) <- ss_comb$ID
+
+  ss_meta <- ss_comb %>%
+    select(all_of(metacols))
+
+  ss_mat_t <- t(ss_mat)
+
+  covar_numeric <- cbind(
+    Age = as.numeric(ss_meta$Age),
+    Sex = as.numeric(factor(ss_meta$Sex))
+  )
+
+  design_matrix <- model.matrix(~ family, data = ss_meta)
+
+  corrected <- removeBatchEffect(
+    x = ss_mat_t,
+    batch = ss_meta$batch,
+    covariates = covar_numeric,
+    design = design_matrix
+  )
+
+  corrected <- as.data.frame(t(corrected))
+  corrected <- as.data.frame(scale(corrected))
+  corrected$family <- ss_meta$family
+
+  group_medians <- corrected %>%
+    group_by(family) %>%
+    summarise(across(where(is.numeric), median, na.rm = TRUE)) %>%
+    column_to_rownames("family")
+
+  group_medians <- group_medians[c("Control","PSP-CBD"), , drop = FALSE]
+
+  global_min <- min(group_medians, na.rm = TRUE)
+  global_max <- max(group_medians, na.rm = TRUE)
+
+  plot_data <- rbind(
+    Max = rep(global_max, ncol(group_medians)),
+    Min = rep(global_min, ncol(group_medians)),
+    group_medians
+  )
+
+  colnames(plot_data) <- gsub("_.*", "", colnames(plot_data))
+  color_vector <- colors[rownames(group_medians)]
+
+  svg(
+    filename = paste0(cell_type, "_radar_PSPvsControl.svg"),
+    width = 8,
+    height = 8
+  )
+
+  # Large symmetric margins to avoid clipping
+  op <- par(
+    mar = c(4, 4, 4, 4),
+    xpd = NA,              # allow drawing outside plot region
+    cex.main = 1.7,
+    cex.lab = 1.4,
+    cex.axis = 1.3
+  )
+
+  create_beautiful_radarchart(
+    plot_data,
+    color = color_vector,
+    caxislabels = round(seq(global_min, global_max, length.out = 5), 2),
+    title = cell_type
+  )
+
+  par(op)
+  dev.off()
+}
