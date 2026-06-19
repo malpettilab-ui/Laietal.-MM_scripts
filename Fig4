@@ -1,0 +1,28 @@
+##spearman correlation for cognitive tests 
+
+for (i in colnames(X)) {
+  for (j in colnames(Y)) {
+    key <- paste(i, j, sep = "_vs_")
+    
+    test <- suppressWarnings(cor.test(X[, i], Y[, j], method = "spearman", exact = FALSE))
+    
+    results_list[[key]] <- data.frame(
+      estimate = unname(test$estimate),
+      p.value = test$p.value,
+      stringsAsFactors = FALSE
+    )
+  }
+}
+
+results <- do.call(rbind, results_list)
+
+# Add comparison names as column
+results <- results %>%
+  tibble::rownames_to_column(var = "comparison")
+
+# Extract X and Y from comparison string
+results <- results %>%
+  mutate(
+    X = str_split_fixed(comparison, "_vs_", 2)[, 1],
+    Y = str_split_fixed(comparison, "_vs_", 2)[, 2]
+  )
