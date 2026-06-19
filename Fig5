@@ -1,0 +1,147 @@
+##nulisa 
+Single sPLS tuning 
+with X as nulisa and Y as cell types
+goal is to find which cytokine explanin cell types variance
+
+```{r}
+library(mixOmics)
+X=all_nulisa_imp_infl_adj
+Y=count_mat_adj
+tune.pls2.inf <- pls(X = X, Y = Y, ncomp = 5, mode = 'regression',scale=F)
+
+
+set.seed(33)  # For reproducibility with this handbook, remove otherwise
+Q2.pls2.liver <- perf(tune.pls2.inf, validation = 'Mfold', folds = 5, 
+                      nrepeat = 50)
+
+
+svg(filename = "IFL_Q2_pls2_inf_270226.svg", width = 6, height = 5)
+op <- par(cex = 5, cex.axis = 1.2, cex.lab = 1.3, cex.main = 1.3)
+plot(Q2.pls2.inf, criterion = "Q2.total", title.size = 1.6, 
+     axis.text.size = 1.4, 
+     axis.title.size = 1.5, 
+     legend.size = 1.3) 
+par(op)
+dev.off()
+
+
+X <- list(
+  nulisa = all_nulisa_imp_infl_adj,  # 248 features
+  counts = count_mat_adj             # 27 features
+)
+
+design <- matrix(
+  0.7, 
+  ncol = length(X), 
+  nrow = length(X),
+  dimnames = list(names(X), names(X))
+)
+diag(design) <- 0
+
+# Grid of keepX values
+keepX_grid <- expand.grid(
+  nulisa = c(10, 15, 20, 25, 30, 35, 40, 50, 60, 70, 80),
+  counts = c(3, 5, 7, 10, 15, 20, 25)
+)
+
+
+ncomp_grid <- 2
+n_total <- nrow(keepX_grid) * length(ncomp_grid)
+
+results <- vector("list", n_total)
+
+res_df <- data.frame(
+  keep_nulisa = integer(),
+  keep_counts = integer(),
+  ncomp = integer(),
+  comp = integer(),
+  cor = numeric()
+)
+
+idx <- 1
+results <- list()
+
+for (i in seq_len(nrow(keepX_grid))) {
+  for (k in ncomp_grid) {
+
+    keepX_k <- list(
+      nulisa = rep(keepX_grid$nulisa[i], k),
+      counts = rep(keepX_grid$counts[i], k)
+    )
+
+    mod <- block.spls(
+      X = X,
+      indY = 1,
+      ncomp = k,
+      keepX = keepX_k,
+      design = design
+    )
+
+    for (j in seq_len(k)) {
+      cor_j <- cor(
+        mod$variates$nulisa[, j],
+        mod$variates$counts[, j]
+      )
+
+      res_df <- rbind(
+        res_df,
+        data.frame(
+          keep_nulisa = keepX_grid$nulisa[i],
+          keep_counts = keepX_grid$counts[i],
+          ncomp = k,
+          comp = j,
+          cor = cor_j
+        )
+      )
+    }
+
+    results[[idx]] <- mod
+    idx <- idx + 1
+  }
+}
+
+library(fields)
+library(viridisLite)
+
+global_min <- min(res_df$cor, na.rm = TRUE)
+global_max <- max(res_df$cor, na.rm = TRUE)
+```
+
+
+
+choice.ncomp <- 2
+choice.keepX <- list(
+  nulisa = rep(20, choice.ncomp),  
+  counts = rep(27, choice.ncomp)
+)
+
+
+basic.mbspls.model = block.spls(X,indY=1,# generate basic model
+                                ncomp = 2, 
+                                design = design,keepX = choice.keepX)
+
+
+circosPlot(basic.mbspls.model, 
+           group = Y_group, 
+           comp=1:2,# Add the group parameter
+           cutoff = 0.4,
+           size.variables=0.5,#text
+           Y.name = 'nulisa',
+           segmentWidth=4,
+           color.blocks = c('darkorchid', 'lightgreen'),
+           color.cor = c("firebrick", "steelblue"), 
+           size.labels = 2)
+
+
+
+pdf("diablo_network_infl_nulisaY_270226.pdf", width = 12, height = 12)
+myNetwork=network(
+  basic.mbspls.model,
+  blocks = c(1, 2),
+  cutoff = 0.4
+)
+
+dev.off()
+library(igraph)
+write.graph(myNetwork$gR, file = "myNetworkinfl_04_nulisaY_270226.gml", format = "gml")
+
