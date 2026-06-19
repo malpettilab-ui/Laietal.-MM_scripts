@@ -1,0 +1,87 @@
+
+library(survival)
+library(MASS)
+library(broom)
+library(dplyr)
+
+control_vars <- c("Age_study_entry", "Sex", "totalcells")
+
+models <- lapply(split(df, df$Cluster), function(sub) {
+  cat("Cluster:", sub$Cluster[1], "(n =", nrow(sub), ")\n")
+
+  # skip very small clusters
+  if (nrow(sub) < 10) {
+    cat(" → skipped (too few rows)\n")
+    return(NULL)
+  }
+
+  # simplified but still allows interactions
+  full_formula <- as.formula(
+    paste(
+      "Surv(Time, status) ~ PC1scores*NEFL + PC1scores*Disease_duration + ",
+      paste(control_vars, collapse = " + ")
+    )
+  )
+
+  # base Cox model
+  full_fit <- try(coxph(full_formula, data = sub, control = coxph.control(iter.max = 100)), silent = TRUE)
+  if (inherits(full_fit, "try-error")) {
+    cat(" → full_fit failed\n")
+    return(NULL)
+  }
+
+  # robust stepAIC
+  step_fit <- try(
+    stepAIC(
+      full_fit,
+      scope = list(upper = full_formula, lower = ~1),
+      direction = "both",
+      trace = FALSE
+    ),
+    silent = TRUE
+  )
+
+  # fallback: if stepAIC fails, keep full model
+  if (inherits(step_fit, "try-error")) {
+    cat(" → stepAIC failed, using full_fit\n")
+    step_fit <- full_fit
+  } else {
+    cat(" → stepAIC succeeded\n")
+  }
+
+  # extract coefficients safely
+  coef_df <- tidy(step_fit, conf.int = TRUE, exponentiate = TRUE)
+  coef_df$Cluster <- sub$Cluster[1]
+  return(coef_df)
+})
+
+# combine results
+models <- purrr::compact(models)     # drop NULLs if any
+results_df <- bind_rows(models)
+rownames(results_df) <- NULL
+ results_df=results_df %>%  mutate(
+    significant = ifelse(`p.value` < 0.05, "Significant", "Not Significant"),
+    term_face = ifelse(`p.value` < 0.05, "bold", "plain")
+  )
+
+
+ library(ggplot2)
+C2=results_df %>%  filter(Cluster=='Cluster_2') 
+#write.csv(results_df,'stepwise_cluster_surv_nfl_270226.csv')
+p=ggplot(C2, aes(y = reorder(term, estimate), x = estimate, color = significant)) +
+  geom_point(size = 3) +
+  geom_errorbarh(aes(xmin = conf.low, xmax = conf.high), height = 0.2, linewidth = 2) +
+  geom_vline(xintercept = 1, linetype = "dashed", color = "black") +   # HR threshold
+  scale_x_log10() +                                                      # log scale for HR
+  annotation_logticks(sides = "b") +
+  scale_color_manual(values = c("Significant" = "darkred", "Not Significant" = "grey")) +
+  labs(x = "Hazard Ratio (log scale)", y = "Covariate", title = "Stepwise Cox Proportional for Cluster 2") +
+  theme_minimal() +
+  theme(
+    axis.text.y = element_text(size = 50),
+    axis.text.x = element_text(size = 50),
+    axis.title.x = element_text(size = 50),
+    plot.title = element_text(size = 50, face = "bold"),
+    legend.text = element_text(size = 50),
+    legend.position = "bottom"
+  )
