@@ -1,0 +1,81 @@
+###creating circos plot
+set.seed(8)
+
+# ===== Function to compute partial correlation with covariates =====
+get_partial_cor_matrix <- function(X, Y = NULL, Z = NULL, method = "pearson") {
+  if (!requireNamespace("ppcor", quietly = TRUE)) {
+    stop("Package 'ppcor' is required. Please install it with install.packages('ppcor').")
+  }
+  
+  # --- Helper: force numeric matrix ---
+  to_numeric_matrix <- function(obj) {
+    if (is.data.frame(obj)) {
+      obj <- as.matrix(obj)
+    }
+    if (!is.matrix(obj)) {
+      stop("Input must be coercible to a numeric matrix.")
+    }
+    mode(obj) <- "numeric"
+    obj
+  }
+  
+  # Coerce inputs
+  X <- to_numeric_matrix(X)
+  if (is.null(Y)) {
+    Y <- X
+  } else {
+    Y <- to_numeric_matrix(Y)
+  }
+  
+  cor_mat <- matrix(NA_real_, ncol(X), ncol(Y),
+                    dimnames = list(colnames(X), colnames(Y)))
+  pval_mat <- matrix(NA_real_, ncol(X), ncol(Y),
+                     dimnames = list(colnames(X), colnames(Y)))
+  
+  for (i in seq_len(ncol(X))) {
+    for (j in seq_len(ncol(Y))) {
+      
+      # Skip diagonal and redundant pairs if X and Y are identical
+      if (identical(X, Y)) {
+        if (i == j || j < i) next
+      }
+      
+      df <- data.frame(
+        x = X[, i],
+        y = Y[, j],
+        Z
+      )
+      df <- df[complete.cases(df), ]
+      
+      if (nrow(df) >= 4) {
+        tryCatch({
+          res <- ppcor::pcor.test(
+            df$x, df$y,
+            if (!is.null(Z)) df[, colnames(Z), drop = FALSE] else NULL,
+            method = method
+          )
+          
+          if (!is.na(res$estimate) && abs(res$estimate) <= 1) {
+            cor_mat[i, j] <- res$estimate
+            pval_mat[i, j] <- res$p.value
+            
+            # Fill symmetry if X == Y
+            if (identical(X, Y)) {
+              cor_mat[j, i] <- res$estimate
+              pval_mat[j, i] <- res$p.value
+            }
+          } else {
+            warning(sprintf("Invalid correlation value for %s vs %s: %s",
+                            colnames(X)[i], colnames(Y)[j], res$estimate))
+          }
+        }, error = function(e) {
+          message(sprintf("Error in %s vs %s: %s",
+                          colnames(X)[i], colnames(Y)[j], e$message))
+        })
+      }
+    }
+  }
+  
+  list(cor = cor_mat, pval = pval_mat)
+}
+
