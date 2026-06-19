@@ -1,0 +1,239 @@
+##indiidual cell types statistical comparison
+sup_dx=sup_dx %>% 
+  rename(Sex=Sex.x) %>% 
+  dplyr::select(ID,Age_study_entry,Sex,Family,batch)
+count_matrix=count_matrix[rownames(count_matrix)%in%sup_dx$ID,]
+dx=dx %>% 
+  filter(ID%in%sup_dx$ID)
+all(sup_dx$ID==rownames(count_matrix))
+totalcells=readRDS('C:/Users/Kei Onn/Desktop/MMlabwork/raw_copy_teams/figures_latests_220825/scripts_latest/totalcells.RDS')
+totalcells=totalcells %>% 
+  filter(ID%in%sup_dx$ID)
+sup_dx=sup_dx %>% 
+  left_join(.,totalcells,by='ID')
+#save.image('input_indivcelltypes_PSPonly.RData')
+
+```
+
+```{r}
+
+library(broom)
+results_list <- list()
+library(dplyr)
+library(broom)
+
+# Ensure count_matrix rows match sup_dx$ID
+count_matrix=as.data.frame(t(count_matrix))
+all(rownames(count_matrix)==sup_dx$ID)
+getwd()
+
+colnames(count_matrix)=gsub('Treg_final','Treg',colnames(count_matrix))
+```
+
+
+
+```{r}
+count_matrix=as.data.frame(t(count_matrix))
+results_list <- list()
+
+for (feature in colnames(count_matrix)) {
+  
+  # Prepare data
+  df <- sup_dx %>%
+    mutate(
+      counts = count_matrix[, feature]
+    )
+  
+  # Fit negative binomial GLM with offset for total cells
+  # offset(log(totalcells)) accounts for differing total counts
+  glm_fit <- try(glm.nb(counts ~ Family + batch +Sex+Age_study_entry+ offset(log(totalcells)),
+                        data = df), silent = TRUE)
+  
+  # Skip if fitting fails
+  if (inherits(glm_fit, "try-error")) {
+    message("Skipping feature ", feature, ": GLM failed")
+    next
+  }
+  
+  # Save tidy results
+  glm_summary <- broom::tidy(glm_fit)
+  
+  # Keep only Family term
+  family_term <- glm_summary %>% filter(grepl("Family", term))
+  
+  results_list[[feature]] <- family_term
+}
+
+# Combine results into one data frame
+glm_results <- bind_rows(lapply(names(results_list), function(f) {
+  cbind(feature = f, results_list[[f]])
+}))
+
+View(glm_results)
+glm_results <- glm_results %>%
+  mutate(p_adj = p.adjust(p.value, method = "fdr"))
+#write.csv(glm_results,file='glm_PSPonly_raw.csv')
+getwd()
+
+#####clustering
+
+Getting dendro for cell types here
+
+```{r}
+library(ggtree)
+library(ggtreeDendro)
+library(aplot)
+library(mdendro)
+set.seed(8)
+colnames(count_matrix) <- gsub("-", "_", colnames(count_matrix))
+scale_color_subtree <- ggtreeDendro::scale_color_subtree
+
+# --- 1. Correlation across features ---
+corr_mat <- cor(count_matrix, method = "pearson", use = "pairwise.complete.obs")
+
+# keep only positive correlations
+corr_mat[corr_mat < 0] <- 0  
+
+# dissimilarity
+dissimilarity <- 1 - corr_mat
+
+# --- 2. Convert to mdendro linkage object ---
+lnk <- linkage(as.dist(dissimilarity), digits = 1, method = "complete")
+
+#p=autoplot(lnk, layout = "circular") +
+ # geom_tiplab(size = 4) +
+ # scale_color_subtree(4) +     # color 3 clusters
+#  guides(col="none")
+celltype_clusters <- cutree(as.hclust(lnk), k = 4)
+cluster_ids <- sort(unique(celltype_clusters))
+p
+"#377EB8FF""#4DAF4AFF""#A6D854FF""#F781BFFF"
+
+#first color not used as its origin
+p <- autoplot(lnk, layout = "circular",size=5) +
+  geom_tiplab(size = 20) +
+  scale_color_subtree(4) +
+  scale_color_manual(values = c("black", "#FC9A1D", "#377EB8FF", "#4DAF4AFF","#F781BFFF")) +  # override palette
+  theme_tree() +
+  guides(color = "none")+
+  theme(plot.margin = margin(0, 0, 0, 0, "cm"),
+        plot.background = element_rect(fill = "white")) +
+  guides(color = "none")
+
+p
+
+
+get_cluster_PC1 <- function(count_mat_adj, celltype_clusters) {
+  cluster_ids <- unique(celltype_clusters)
+  
+  pc1_mat <- matrix(nrow = nrow(count_mat_adj), ncol = length(cluster_ids))
+  rownames(pc1_mat) <- rownames(count_mat_adj)
+  colnames(pc1_mat) <- paste0("Cluster_", cluster_ids)
+  
+  for (cl in cluster_ids) {
+    features <- names(celltype_clusters)[celltype_clusters == cl]
+    features <- features[features %in% colnames(count_mat_adj)]
+    if(length(features) == 0) {
+      pc1_mat[, paste0("Cluster_", cl)] <- NA
+      next
+    }
+    pca_res <- prcomp(count_mat_adj[, features, drop=FALSE], scale.=TRUE)
+    pc1_mat[, paste0("Cluster_", cl)] <- pca_res$x[,1]
+  }
+  
+  return(pc1_mat)
+}
+
+
+get_cluster_PC1_loadings <- function(count_mat_adj, celltype_clusters) {
+  cluster_ids <- unique(celltype_clusters)
+  pc1_loadings_list <- list()
+  
+  for (cl in cluster_ids) {
+    features <- names(celltype_clusters)[celltype_clusters == cl]
+    features <- features[features %in% colnames(count_mat_adj)]
+    
+    if (length(features) <= 1) {
+      # Not enough features to run PCA
+      pc1_loadings_list[[as.character(cl)]] <- NA
+      next
+    }
+    
+    pca_res <- prcomp(count_mat_adj[, features, drop = FALSE], scale. = TRUE)
+    
+    # Extract PC1 loadings (gene contributions)
+    loadings <- pca_res$rotation[, 1]
+    
+    # Store as named vector
+    pc1_loadings_list[[as.character(cl)]] <- loadings
+  }
+  
+  names(pc1_loadings_list) <- paste0("Cluster_", cluster_ids)
+  return(pc1_loadings_list)
+}
+
+
+cluster_PC1_loadings <- get_cluster_PC1_loadings(count_mat_adj, celltype_clusters)
+
+plot_cluster_PC1_loadings <- function(cluster_PC1_loadings, top_n = NULL) {
+  # Convert list to tidy data frame
+  loadings_df <- bind_rows(
+    lapply(names(cluster_PC1_loadings), function(cl) {
+      vals <- cluster_PC1_loadings[[cl]]
+      if (is.numeric(vals)) {
+        data.frame(
+          Gene = names(vals),
+          Loading = vals,
+          Cluster = cl,
+          stringsAsFactors = FALSE
+        )
+      } else {
+        NULL
+      }
+    }),
+    .id = "id"
+  )
+  
+  # Optionally keep top absolute loadings per cluster
+  if (!is.null(top_n)) {
+    loadings_df <- loadings_df %>%
+      group_by(Cluster) %>%
+      slice_max(order_by = abs(Loading), n = top_n)
+  }
+  
+  # Order genes by descending loading within each cluster
+  loadings_df <- loadings_df %>%
+    group_by(Cluster) %>%
+    arrange(desc(Loading), .by_group = TRUE) %>%
+    mutate(Gene = factor(Gene, levels = unique(Gene)))
+  
+  # Plot
+  p <- ggplot(loadings_df, aes(x = Loading, y = Gene, fill = Loading)) +
+  geom_bar(stat = "identity") +
+  facet_wrap(~ Cluster, scales = "free_y") +
+  scale_fill_gradientn(
+    colours = rev(brewer.pal(11, "RdYlBu")),
+    limits = c(min(loadings_df$Loading, na.rm = TRUE),
+               max(loadings_df$Loading, na.rm = TRUE)),
+    oob = scales::squish,
+    name = "PC1 Loading"
+  ) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "gray40") +
+  theme_minimal(base_size = 40) +
+  labs(
+    x = "PC1 Loading",
+    y = "Cell Type",
+    title = "PC1 Loadings per Cell Type Cluster"
+  ) +
+  theme(
+    strip.text = element_text(face = "bold", size = 50),
+    axis.text.y = element_text(size = 50),
+    axis.text.x = element_text(size = 50, angle = 45, hjust = 1),
+    axis.title.x = element_text(size = 50),
+    axis.title.y = element_text(size = 50),
+    plot.title = element_text(size = 50))
+  
+  return(p)
+}
+
+
